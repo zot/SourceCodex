@@ -1,0 +1,319 @@
+#!/bin/bash
+#set -x
+app=$(dirname $(realpath $0))
+action=usage
+option=''
+findIgnores=(-wholename ./.indexer)
+watchIgnores='^.indexer$'
+V=0
+quiet=''
+dirChecked=''
+inTransaction=''
+
+monitor() {
+    update
+    if [ -z "$quiet" ]; then
+        echo Ready.
+    fi
+    if [ "$V" -gt 0 ]; then
+        cv='-v'
+    fi
+    coffee $(cygpath -w "$app/watch.coffee") $cv -i "$watchIgnores" . | while read -r line; do
+        verbose 1 CHANGE: $line
+        set $line
+        local file=$(cygpath "${line#$1 }")
+        if [ "$1" = BEGIN ]; then
+            echo 'begin transaction;'
+            inTransaction=true
+        elif [ "$1" = END ]; then
+            echo 'commit transaction;'
+            inTransaction=''
+        else
+            [ -z "$inTransaction" ] && echo 'begin transaction;'
+            case "$1" in
+                DELETE)
+                    verbose 1 1 DELETE "$file"
+                    deleteFiles "$file"
+                    ;;
+                CREATE)
+                    verbose 1 CREATE "$file"
+                    addFiles "$file"
+                    ;;
+                MODIFY)
+                    verbose 1 MODIFY "$file"
+                    deleteLines "$file"
+                    addFiles "$file"
+                    ;;
+            esac
+            [ -z "$inTransaction" ] && echo 'commit transaction;'
+        fi
+    done | sqlite3 .indexer
+}
+
+verbose() {
+    if [ "$1" -le "$V" ]; then
+        shift
+        echo "$@" 1>&2
+    fi
+}
+
+checkDir() {
+    if [ -z "$dirChecked" ]; then
+        if [ -z "$dir" ]; then
+            usage "No directory given"
+        fi
+        cd "$dir"
+        dirChecked=true
+    fi
+}
+
+sql() {
+    checkDir
+    cmd=$(cat <<EOF
+begin transaction;
+create table if not exists files (path primary key, stamp);
+create virtual table if not exists lines using fts4 (path, line_number, line, notindexed=line_number, notindexed=path);
+create virtual table if not exists lines_terms using fts4aux(lines);
+$*
+commit transaction;
+EOF
+)
+    verbose 2 SQL COMMAND: "$cmd"
+    sqlite3 .indexer "$cmd"
+}
+
+scrub() {
+    checkDir
+    rm -f ".indexer"
+}
+
+addFiles() {
+    if [ $# != 0 ]; then
+        clauses=$(expr "$(find "$@" -type f -printf ',("%p",%A@)' -o -prune)" : '.\(.*\)')
+        verbose 1 Add files values $clauses
+        verbose 2 "insert or replace into files values $clauses;"
+        echo "insert or replace into files values $clauses;"
+        addLines "$@"
+    fi
+}
+
+addLines() {
+    verbose 1 Add lines "$@"
+    deleteLines "$@"
+    files=()
+    for f in "$@"; do
+        if file $f | grep text > /dev/null; then
+            verbose 0 using textfile: "$f"
+            files[${#files[*]}]="$f"
+        else
+            verbose 0 omitting non-textfile: "$f"
+        fi
+    done
+    for file in "${files[@]}"; do
+        f=$(sed 's/\//\\\//g' <<< "$file")
+        if [ -z "$quiet" ]; then
+            echo "select 'inserting $file';"
+        fi
+        verbose 2 SQL COMMANDS: "$(sed -e "=;s/'/''/g" $file | sed -e "N;s/\n/ /;s/^\([^ ]*\) \(.*\)$/insert into lines values ('$f', \1, '\2');/")"
+        sed -e "=;s/'/''/g" $file | sed -e "N;s/\n/ /;s/^\([^ ]*\) \(.*\)$/insert into lines values ('$f', \1, '\2');/"
+    done
+}
+
+deleteLines() {
+    verbose 1 Delete lines "$@"
+    paths=''
+    for path in "$@"; do
+        paths="$paths$path\n"
+    done
+    verbose 2 -e PATHS: "'$paths'"
+    paths=$(echo -e "$paths" | sed "/^$/d;s/'/''/g;s/^.*$/('&')/;s/^/,/;1s/^,//")
+    verbose 2 "delete from lines where path in (values $(echo $paths));"
+    echo "delete from lines where path in (values $(echo $paths));"
+}
+
+deleteFiles() {
+    deleteLines "$@"
+    verbose 1 Delete files "$@"
+    paths=''
+    for path in "$@"; do
+        paths="$paths$path\n"
+    done
+    verbose 2 -e PATHS: "'$paths'"
+    paths=$(echo -e "$paths" | sed "/^$/d;s/'/''/g;s/^.*$/('&')/;s/^/,/;1s/^,//")
+    verbose 2 "delete from files where path in (values $(echo $paths));"
+    echo "delete from files where path in (values $(echo $paths));"
+}
+
+prefixSearch() {
+    checkDir
+    verbose 1 Search pattern: "$pattern", dir: "$dir"
+    sqlite3 .indexer "select path || ':' || line_number || ':' || line from lines where line match '$pattern*'"
+}
+
+middleSearch() {
+    checkDir
+    verbose 1 Search pattern: "$pattern", dir: "$dir"
+    cmd=''
+    terms=$(sqlite3 .indexer "select term from lines_terms where term glob '*$pattern*'")
+    for t in $terms; do
+        if [ -n "$cmd" ]; then
+            cmd="$cmd union select rowid, path, line_number, line from lines where line match '$t'"
+        else
+            cmd="select rowid, path, line_number, line from lines where line match '$t'"
+        fi
+    done
+    if [ -n "$terms" ]; then
+        #echo SQL: "$cmd"
+        echo TERMS: $terms
+        sqlite3 .indexer "select path || ':' || line_number || ':' || line from ($cmd) group by rowid order by rowid"
+    else
+        echo NO TERMS
+    fi
+}
+
+update() {
+    checkDir
+    verbose 1 Update
+    clauses=$(findCommand -printf ',("%p",%A@)' | sed 's/,("\.\//,("/g')
+    verbose 1 UPDATE CLAUSES: "$clauses"
+    cmd=$(cat <<EOF
+create temp table currentFiles(path primary key, stamp);
+insert into currentFiles values $(expr "$clauses" : '.\(.*\)');
+delete from files where path not in (select path from currentFiles);
+delete from lines where path not in (select path from currentFiles);
+create temp table newFiles as
+  select currentFiles.path, currentFiles.stamp
+  from currentFiles left join files on currentFiles.path = files.path
+  where files.path is null or files.stamp < currentFiles.stamp;
+select path from newFiles;
+EOF
+)
+    output=$(sql "$cmd")
+    verbose 1 -E SQL: "$output"
+    if [ -n "$output" ]; then
+        files=()
+        while read -r file; do
+            verbose 1 FILE: $file
+            files[${#files[*]}]="$file"
+        done <<< "$output"
+        verbose 1 Inserting files: "${files[@]}"
+        (echo 'begin transaction;'
+        verbose 2 'begin transaction;'
+        addFiles "${files[@]}"
+        verbose 2 'commit transaction;'
+        echo 'commit transaction;') | sqlite3 .indexer
+    else
+        verbose 1 No recent changes.
+    fi
+}
+
+setAction() {
+    if [ -n "$option" ]; then
+        usage "Attempt to use to actions at once, $option and $1"
+    fi
+    option=$1
+    action=$2
+}
+
+escape() {
+    sed -e 's/[.\\]/\\&/g;s/\*/.*/g' <<< "$1"
+}
+
+addIgnore() {
+    verbose 1 add ignore "$1"
+    if [ "$1" = / ]; then
+        exit
+    fi
+    anchored=$(expr "$1" : '/\(.*\)')
+    findIgnores[${#findIgnores[*]}]=-o
+    findIgnores[${#findIgnores[*]}]="-wholename"
+    if [ -n "$anchored" ]; then
+        f=$(expr "$1" : '.\(.*\)')
+        findIgnores[${#findIgnores[*]}]="./$f"
+        watchIgnores="$watchIgnores|^$(escape $f)(\\\\|$)"
+    else
+        findIgnores[${#findIgnores[*]}]="*$1"
+        watchIgnores="$watchIgnores|(^|\\\\)$(escape $1)(\\\\|$)"
+    fi
+}
+
+findCommand() {
+    checkDir
+    if [ $# = 0 ]; then
+        set -- -print
+    fi
+    verbose 1 find command: find . "(" "${findIgnores[*]}" ")" -prune -o -type f "$@"
+    find . "(" "${findIgnores[@]}" ")" -prune -o -type f "$@"
+}
+
+processArgs() {
+    while [ "$#" != 0 ]; do
+        case "$1" in
+            -h)
+                usage
+                ;;
+            -d)
+                setAction -d scrub
+                ;;
+            -p)
+                setAction -p prefixSearch
+                pattern="$2"
+                shift
+                ;;
+            -s)
+                setAction -p middleSearch
+                pattern="$2"
+                shift
+                ;;
+            -u)
+                setAction -u update
+                ;;
+            -m)
+                setAction -m monitor
+                ;;
+            -i)
+                addIgnore "$2"
+                shift
+                ;;
+            -v)
+                V=$((V + 1))
+                ;;
+            -q)
+                quiet=true
+                ;;
+            -*)
+                usage "Unknown argument: $1"
+                ;;
+            *)
+                dir="$1"
+                ;;
+        esac
+        shift
+    done
+}
+
+usage() {
+    if [ $# != 0 ]; then
+        echo $*
+        echo
+    fi
+    cat <<EOF
+Usage: $(basename $0) [-h | -d | -s PATTERN | -m | -u] [DIR]
+DIR is the directory containing the files to index.
+If DIR is given, a new ".indexer" database is created
+in DIR if it does not exist
+OPTIONS:
+  -h            Print this message
+  -d            Delete the .indexer database
+  -i PATTERN    Ignore files matching pattern
+  -s PATTERN    Search for prefix token pattern in files and return matched lines in grep format
+  -t PATTERN    Find all tokens matching pattern
+  -u            Update
+  -v            Inccrease verbosity
+  -q            Turn off progress notifications
+EOF
+    exit 1
+}
+
+processArgs "$@"
+$action
