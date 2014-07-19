@@ -1,0 +1,31 @@
+* Indexer
+A very simple platform for indexing and searching directories recursively
+
+** Goals
+- command line tool
+- automatically updates from file/directory changes
+- zero admin (just run the tool in the background for updates)
+- rapid search, suitable for incremental completion
+- suitable for callers/callees, etc.
+- easy to extend
+
+** Architecture
+- built on SQLite
+  - allows different programs to use the same database
+  - allows background updating
+  - other programs can access/change the database
+
+** Schema
+There are 3 tables: files, lines, and lines_terms.
+
+#+BEGIN_SRC SQL
+create table files (path primary key, stamp);
+create virtual table lines using fts4 (path, line_number, line);
+create virtual table lines_terms using fts4aux(lines);
+#+END_SRC
+
+Files tracks the indexed files.
+
+Lines stores all of the lines of the tracked files and maintains a full-text index.
+
+Lines_terms lets you access the internals of the index like the terms (tokens).

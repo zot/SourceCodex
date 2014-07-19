@@ -9,6 +9,8 @@ V=0
 quiet=''
 dirChecked=''
 inTransaction=''
+notify=''
+limit=''
 
 monitor() {
     update
@@ -18,6 +20,7 @@ monitor() {
     if [ "$V" -gt 0 ]; then
         cv='-v'
     fi
+    changes=()
     coffee $(cygpath -w "$app/watch.coffee") $cv -i "$watchIgnores" . | while read -r line; do
         verbose 1 CHANGE: $line
         set $line
@@ -29,6 +32,7 @@ monitor() {
             echo 'commit transaction;'
             inTransaction=''
         else
+            [ -n "$notify" ] && changes[${#changes[*]}]="$1 $file"
             [ -z "$inTransaction" ] && echo 'begin transaction;'
             case "$1" in
                 DELETE)
@@ -48,6 +52,9 @@ monitor() {
             [ -z "$inTransaction" ] && echo 'commit transaction;'
         fi
     done | sqlite3 .indexer
+    for change in "${changes[@]}"; do
+        echo "$change"
+    done
 }
 
 verbose() {
@@ -79,7 +86,7 @@ commit transaction;
 EOF
 )
     verbose 2 SQL COMMAND: "$cmd"
-    sqlite3 .indexer "$cmd"
+    echo -E "$cmd" | sqlite3 .indexer
 }
 
 scrub() {
@@ -103,10 +110,7 @@ addLines() {
     files=()
     for f in "$@"; do
         if file $f | grep text > /dev/null; then
-            verbose 0 using textfile: "$f"
             files[${#files[*]}]="$f"
-        else
-            verbose 0 omitting non-textfile: "$f"
         fi
     done
     for file in "${files[@]}"; do
@@ -147,7 +151,7 @@ deleteFiles() {
 prefixSearch() {
     checkDir
     verbose 1 Search pattern: "$pattern", dir: "$dir"
-    sqlite3 .indexer "select path || ':' || line_number || ':' || line from lines where line match '$pattern*'"
+    sqlite3 .indexer "select path || ':' || line_number || ':' || line from lines where line match '$pattern*' $limit"
 }
 
 middleSearch() {
@@ -165,7 +169,7 @@ middleSearch() {
     if [ -n "$terms" ]; then
         #echo SQL: "$cmd"
         echo TERMS: $terms
-        sqlite3 .indexer "select path || ':' || line_number || ':' || line from ($cmd) group by rowid order by rowid"
+        sqlite3 .indexer "select path || ':' || line_number || ':' || line from ($cmd) group by rowid order by rowid $limit"
     else
         echo NO TERMS
     fi
@@ -174,18 +178,23 @@ middleSearch() {
 update() {
     checkDir
     verbose 1 Update
-    clauses=$(findCommand -printf ',("%p",%A@)' | sed 's/,("\.\//,("/g')
-    verbose 1 UPDATE CLAUSES: "$clauses"
+    inserts=$(findCommand -printf 'insert into currentFiles values ("%p",%A@,"CREATE");\n')
+    verbose 1 UPDATE CLAUSES: "$inserts"
     cmd=$(cat <<EOF
-create temp table currentFiles(path primary key, stamp);
-insert into currentFiles values $(expr "$clauses" : '.\(.*\)');
+create temp table currentFiles(path primary key, stamp, state);
+$inserts
+update currentFiles set state = 'MODIFY' where path in (select path from files);
+create temp table newFiles as
+  select currentFiles.path, currentFiles.state
+    from currentFiles left join files on currentFiles.path = files.path
+    where files.path is null or files.stamp < currentFiles.stamp;
+insert into newFiles
+  select files.path, 'DELETE'
+    from files left join currentFiles on currentFiles.path = files.path
+    where currentFiles.path is null;
 delete from files where path not in (select path from currentFiles);
 delete from lines where path not in (select path from currentFiles);
-create temp table newFiles as
-  select currentFiles.path, currentFiles.stamp
-  from currentFiles left join files on currentFiles.path = files.path
-  where files.path is null or files.stamp < currentFiles.stamp;
-select path from newFiles;
+select state || " " || path from newFiles;
 EOF
 )
     output=$(sql "$cmd")
@@ -193,8 +202,11 @@ EOF
     if [ -n "$output" ]; then
         files=()
         while read -r file; do
-            verbose 1 FILE: $file
-            files[${#files[*]}]="$file"
+            set $file
+            if [ "$1" != DELETE ]; then
+                verbose 1 FILE: $file
+                files[${#files[*]}]="${file#$1 }"
+            fi
         done <<< "$output"
         verbose 1 Inserting files: "${files[@]}"
         (echo 'begin transaction;'
@@ -202,6 +214,9 @@ EOF
         addFiles "${files[@]}"
         verbose 2 'commit transaction;'
         echo 'commit transaction;') | sqlite3 .indexer
+        if [ -n "$notify" ]; then
+            echo "$output"
+        fi
     else
         verbose 1 No recent changes.
     fi
@@ -281,6 +296,15 @@ processArgs() {
             -q)
                 quiet=true
                 ;;
+            -n)
+                quiet=true
+                notify=true
+                ;;
+            -l)
+                limit="limit $2 offset $3"
+                shift
+                shift
+                ;;
             -*)
                 usage "Unknown argument: $1"
                 ;;
@@ -309,8 +333,11 @@ OPTIONS:
   -s PATTERN    Search for prefix token pattern in files and return matched lines in grep format
   -t PATTERN    Find all tokens matching pattern
   -u            Update
+  -m            Update and continue monitoring for changes
   -v            Inccrease verbosity
   -q            Turn off progress notifications
+  -n            Notify of changes (implies -q): 'DELETE'|'CREATE'|'MODIFY' FILE
+  -l LIM OFF    Limit the number of search results to LIM and discard the first OFF
 EOF
     exit 1
 }
