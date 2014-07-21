@@ -32,20 +32,20 @@ coffee() {
 
 scrub() {
     checkDir
-    rm -f ".indexer"
+    rm -f ".sourcecodex"
 }
 
 prefixSearch() {
     checkDir
     verbose 1 Search pattern: "$pattern", dir: "$dir"
-    sqlite3 .indexer "select file || ':' || line_number || ':' || line from lines where line match '$pattern*' $limit"
+    sqlite3 .sourcecodex "select file || ':' || line_number || ':' || line from lines where line match '$pattern*' $limit"
 }
 
 middleSearch() {
     checkDir
     verbose 1 Search pattern: "$pattern", dir: "$dir"
     cmd=''
-    terms=$(sqlite3 .indexer "select term from lines_terms where term glob '*$pattern*'")
+    terms=$(sqlite3 .sourcecodex "select term from lines_terms where term glob '*$pattern*'")
     for t in $terms; do
         if [ -n "$cmd" ]; then
             cmd="$cmd union select rowid, file, line_number, line from lines where line match '$t'"
@@ -56,7 +56,7 @@ middleSearch() {
     if [ -n "$terms" ]; then
         #echo SQL: "$cmd"
         echo TERMS: $terms
-        sqlite3 .indexer "select file || ':' || line_number || ':' || line from ($cmd) group by rowid order by rowid $limit"
+        sqlite3 .sourcecodex "select file || ':' || line_number || ':' || line from ($cmd) group by rowid order by rowid $limit"
     else
         echo NO TERMS
     fi
@@ -64,17 +64,17 @@ middleSearch() {
 
 callers() {
     checkDir
-    sqlite3 .indexer "select coffee.file || ':' || coffee.line || ':' || col || ':' || code || ':' || lines.line from coffee, lines where call = '$func' and coffee.file = lines.file and coffee.line = lines.line_number order by coffee.rowid"
+    sqlite3 .sourcecodex "select file || ':' || line_number || ':' || col || ':' || code || ':' || line from coffee_calls, lines using(file,line_number) where call = '$func' order by coffee_calls.rowid"
 }
 
 callees() {
     checkDir
-    sqlite3 .indexer "select coffee.file || ':' || coffee.line || ':' || col || ':' || code || ':' || call || ':' || lines.line from coffee, lines where code = '$func' and coffee.file = lines.file and coffee.line = lines.line_number order by coffee.rowid"
+    sqlite3 .sourcecodex "select file || ':' || line_number || ':' || col || ':' || code || ':' || call || ':' || line from coffee_calls, lines using(file,line_number) where code = '$func' order by coffee_calls.rowid"
 }
 
-funcs() {
+defs() {
     checkDir
-    sqlite3 .indexer "select code from coffee group by code order by rowid"
+    sqlite3 .sourcecodex "select file || ':' || line_number || ':' || col || ':' || code || ':' || line from coffee_defs, lines using(file,line_number) group by code order by coffee_defs.rowid"
 }
 
 setAction() {
@@ -144,8 +144,8 @@ processArgs() {
                 func="$2"
                 shift
                 ;;
-            --funcs)
-                setAction --funcs funcs
+            --defs)
+                setAction --defs defs
                 ;;
             -*)
                 usage "Unknown argument: $1"
@@ -169,11 +169,11 @@ usage() {
     cat <<EOF
 Usage: $(basename $0) [-h | -d | -s PATTERN | -m | -u] [DIR]
 DIR is the directory containing the files to index.
-If DIR is given, a new ".indexer" database is created
+If DIR is given, a new ".sourcecodex" database is created
 in DIR if it does not exist
 OPTIONS:
   -h            Print this message
-  -d            Delete the .indexer database
+  -d            Delete the .sourcecodex database
   -i PATTERN    Ignore files matching pattern
   -s PATTERN    Search for token pattern in files and return matched lines in grep format
   -p PATTERN    Search for prefix token pattern in files and return matched lines in grep format
@@ -185,8 +185,9 @@ OPTIONS:
   -u            Update
   -m            Update and continue monitoring for changes
   -c            Index CoffeeScript callers and callees
-  --callers F   List call sites of F: FILE:LINE:COL:FUNC
-  --callee F    List F's call sites: FILE:LINE:COL:FUNC
+  --callers F   List call sites of F: FILE:LINE:COL:FUNC:CONTENTS
+  --callees F   List F's call sites: FILE:LINE:COL:FUNC:CONTENTS
+  --defs        List defs: FILE:LINE:COL:FUNC:CONTENTS
 EOF
     exit 1
 }

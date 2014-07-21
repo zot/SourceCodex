@@ -39,12 +39,11 @@ shouldUse = (f)->
 escapeGlob = (ex)-> ex.replace(/[.\\]/g, '\\$&').replace(/\*/g, '.*')
 
 computeIgnore = (ignores)->
-  ignore = '^.indexer$'
+  ignore = '^.sourcecodex$'
   for ig in ignores
     if ig != '/'
       if ig[0] == '/' then ignore = "#{ignore}|^#{escapeGlob ig.substring 1}(\\\\|$)"
       else ignore = "#{ignore}|(^|\\\\)#{escapeGlob ig}(\\\\|$)"
-  verbose 0, "IGNORE:", ignore
   ignoreReg = new RegExp ignore
 
 monitor = (dir)->
@@ -57,6 +56,7 @@ monitor = (dir)->
   w.createMonitor dir, opts, (mon)->
     processInitialFiles mon.files
     if updateOnly
+      write 'exiting'
       mon.stop()
       db.close()
       process.exit 0
@@ -78,7 +78,7 @@ processChange = (type, f, stat)->
 # Database
 #####################
 
-escapeString = (str)-> str.replace /'/, "''"
+escapeString = (str)-> str.replace /'/g, "''"
 
 class Batch
   constructor: ->
@@ -87,19 +87,16 @@ class Batch
     @added = {}
   add: (file, type, stat)->
     if shouldUse file
-      write "Queuing: #{type} #{file}"
       @pendingOut[file] = [type, stat.mtime.getMilliseconds()]
       @queued++
   run: ->
     for file, [type] of @pendingOut
       if type == 'DELETE' then @dequeue()
       else
-        l = 1
         fs.readFile path.resolve(fullDir, file), do (file)=> (e, buf)=>
           if e then @dequeue()
           else magic.detect buf, (e, result)=>
             if !e && result.match /text/ then @added[file] = buf.toString()
-            else write "Not slurping file: #{file}, #{result}"
             @dequeue()
   queue: -> @queued++
   dequeue: ->
@@ -109,19 +106,19 @@ class Batch
     if text = @added[file]
       l = 1
       for line in text.split /\n\r?/
-        run "insert into lines values ('$file', #{l}, '#{escapeString line}');"
+        run "insert into lines values ('#{file}', #{l}, '#{escapeString line}');"
         l++
       if indexCoffee then indexCoffeeFile file, text
   processBatch: ->
     runSql =>
       run "begin transaction;"
       for file, [type, stamp] of @pendingOut
-        run "delete from lines where file = '$file';"
+        run "delete from lines where file = '#{file}';"
         if type == 'DELETE' then run "delete from files where file = '#{file}'"
         else run "insert or replace into files values ('#{escapeString file}', #{stamp})"
         @addLines file
       run "end transaction;"
-      @emitChanges()
+    @emitChanges()
   emitChanges: ->
     if notify
       for file, [type] of @pendingOut
@@ -161,30 +158,33 @@ processInitialFiles = (files)->
       run "insert or replace into files select file, stamp from currentFiles where state != 'DELETE';"
       run "delete from coffee_defs where file in (select file from newFiles where state = 'DELETE');"
       run "delete from coffee_calls where file in (select file from newFiles where state = 'DELETE');"
-      db.each "select file, state, stamp from newFiles;", (err, row)->
+      db.each "select * from (select file, state, stamp, 1 as ord from newFiles union values (null, null, null, 2)) order by ord;", (err, row)=>
         if err then write "ERROR: #{err}"
-        else newFiles.push row[0]
-      @pendingOut = {}
-      for [file, type, stamp] in newFiles
-        @addLines file
-        @pendingOut[file] = [type, stamp]
+        else if row.file != null then newFiles.push row
+        else
+          @pendingOut = {}
+          runSql =>
+            run "begin transaction;"
+            for row in newFiles
+              @addLines row.file
+              @pendingOut[row.file] = [row.state, row.stamp]
+            run "commit transaction;"
+            @emitChanges()
       run "commit transaction;"
-      @emitChanges()
   for file, stat of files
     b.add file, null, stat
   b.run()
 
 checkDb = ->
   if !db
-    write "DIR: #{fullDir + '.indexer'}"
-    db = new sqlite3.Database(fullDir + '.indexer')
+    db = new sqlite3.Database(fullDir + '.sourcecodex')
     sql """
 begin transaction;
 create table if not exists files (file primary key, stamp);
 create virtual table if not exists lines using fts4 (file, line_number, line, notindexed=line_number, notindexed=file);
 create virtual table if not exists lines_terms using fts4aux(lines);
-create table if not exists coffee_defs(file, code, line, col);
-create table if not exists coffee_calls(file, code, call, line, col);
+create table if not exists coffee_defs(file, code, line_number, col);
+create table if not exists coffee_calls(file, code, call, line_number, col);
 create index if not exists coffee_1 on coffee_defs(file);
 create index if not exists coffee_2 on coffee_defs(file, code);
 create index if not exists coffee_3 on coffee_calls(file);
@@ -204,7 +204,7 @@ runSql = (block)->
 
 run = (statement)->
   db.run statement, (err)->
-    if err then process.stderr.write "Error in SQL: #{statement}...\n#{err}\n"
+    if err then write "Error in SQL: #{statement}...\n#{err}\n"
 
 #####################
 # Call graphs
@@ -247,13 +247,13 @@ indexCoffeeFile = (fpath, source)->
       if isDef node
         v = node.variable
         stack.pushContext v.base.value
-        sql "insert into coffee_defs values ('#{fpath}', '#{v.base.value}', #{v.locationData.first_line}, #{v.locationData.first_column});"
+        sql "insert into coffee_defs values ('#{fpath}', '#{v.base.value}', #{v.locationData.first_line + 1}, #{v.locationData.first_column});"
         cont()
         stack.popContext()
       else
         if isCall node
           v = node.variable
-          sql "insert into coffee_calls values ('#{fpath}', '#{stack.topContext()}', '#{v.base.value}', #{v.locationData.first_line}, #{v.locationData.first_column});"
+          sql "insert into coffee_calls values ('#{fpath}', '#{stack.topContext()}', '#{v.base.value}', #{v.locationData.first_line + 1}, #{v.locationData.first_column});"
         cont()
 
 

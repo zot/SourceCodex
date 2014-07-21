@@ -1,4 +1,4 @@
-* Indexer
+* SourceCodex
 A very simple platform for searching callers/callees (and terms) in code projects
 
 ** Goals
@@ -9,6 +9,31 @@ A very simple platform for searching callers/callees (and terms) in code project
 - command line tool
 - zero admin (command line option to monitor project changes means no service needed)
 - small number of dependencies (POSIX/cygwin and node.js)
+
+** USAGE
+#+BEGIN_SRC example
+sourcecodex [-h | -d | -s PATTERN | -m | -u] [DIR]
+DIR is the directory containing the files to index.
+If DIR is given, a new ".sourcecodex" database is created
+in DIR if it does not exist
+OPTIONS:
+  -h            Print this message
+  -d            Delete the .sourcecodex database
+  -i PATTERN    Ignore files matching pattern
+  -s PATTERN    Search for token pattern in files and return matched lines in grep format
+  -p PATTERN    Search for prefix token pattern in files and return matched lines in grep format
+  -l LIM OFF    Limit the number of search results to LIM and discard the first OFF
+  -t PATTERN    Find all tokens matching pattern
+  -v            Inccrease verbosity
+  -q            Turn off progress notifications
+  -n            Notify of changes (implies -q): 'DELETE'|'CREATE'|'MODIFY' FILE
+  -u            Update
+  -m            Update and continue monitoring for changes
+  -c            Index CoffeeScript callers and callees
+  --callers F   List call sites of F: FILE:LINE:COL:FUNC:CONTENTS
+  --callees F   List F's call sites: FILE:LINE:COL:FUNC:CONTENTS
+  --defs        List defs: FILE:LINE:COL:FUNC:CONTENTS
+#+END_SRC
 
 ** Architecture
 - built on SQLite
@@ -37,7 +62,7 @@ A very simple platform for searching callers/callees (and terms) in code project
   - (opengrok, gnu global): https://github.com/OpenGrok/OpenGrok/wiki/Comparison-with-Similar-Tools
 
 ** Schema
-There are 3 tables: files, lines, and lines_terms.
+There are 3 main tables: files, lines, and lines_terms.
 
 #+BEGIN_SRC SQL
 create table files (path primary key, stamp);
@@ -50,3 +75,10 @@ Files tracks the indexed files.
 Lines stores all of the lines of the tracked files and maintains a full-text index.
 
 Lines_terms lets you access the internals of the index like the terms (tokens).
+
+Here are the CoffeeScript call graph tables:
+
+#+BEGIN_SRC SQL
+create table coffee_defs(file, code, line_number, col);
+create table coffee_calls(file, code, call, line_number, col);
+#+END_SRC
