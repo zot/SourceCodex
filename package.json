@@ -25,6 +25,7 @@
       "lodash": "*",
       "sqlite3": "*",
       "mmmagic": "*",
+      "coffee-script": "*",
       "watch": "*"
   },
   "devDependencies": {},
