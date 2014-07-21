@@ -1,19 +1,40 @@
 * Indexer
-A very simple platform for indexing and searching directories recursively
+A very simple platform for searching callers/callees (and terms) in code projects
 
 ** Goals
+- search for callers/callees and patterns
+- fast enough for incremental completion
+- simple
+- easy to extend for languages besides CoffeeScript
 - command line tool
-- automatically updates from file/directory changes
-- zero admin (just run the tool in the background for updates)
-- rapid search, suitable for incremental completion
-- suitable for callers/callees, etc.
-- easy to extend
+- zero admin (command line option to monitor project changes means no service needed)
+- small number of dependencies (POSIX/cygwin and node.js)
 
 ** Architecture
 - built on SQLite
   - allows different programs to use the same database
   - allows background updating
   - other programs can access/change the database
+- extensible
+  - update/monitor command prints events like inotifywatch (CREATE/MODIFY/DELETE file)
+    - you can pipe/tee the output to other programs
+  - other programs can query/change the database
+
+** Todo
+- support full regexp search
+  - maybe just narrow down the lines with a pattern and then pump them through grep
+  - maybe based on Russ Cox's work
+- remove POSIX deps (add bat file for search command)
+
+** References
+- Other code search tools: http://beyondgrep.com/more-tools/
+- Russ Cox's work
+  - codesearch: https://code.google.com/p/codesearch/
+  - trigram analysis: http://swtch.com/~rsc/regexp/regexp4.html
+- beagrep: http://baohaojun.github.io/beagrep.html
+  - beagrep looks very similar, but the author says it's very difficult to install on windows
+- some similar tools do not do callers/callees
+  - (opengrok, gnu global): https://github.com/OpenGrok/OpenGrok/wiki/Comparison-with-Similar-Tools
 
 ** Schema
 There are 3 tables: files, lines, and lines_terms.

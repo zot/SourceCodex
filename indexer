@@ -3,59 +3,10 @@
 app=$(dirname $(realpath $0))
 action=usage
 option=''
-findIgnores=(-wholename ./.indexer)
-watchIgnores='^.indexer$'
 V=0
-quiet=''
 dirChecked=''
-inTransaction=''
-notify=''
 limit=''
-
-monitor() {
-    update
-    if [ -z "$quiet" ]; then
-        echo Ready.
-    fi
-    if [ "$V" -gt 0 ]; then
-        cv='-v'
-    fi
-    changes=()
-    coffee $(cygpath -w "$app/watch.coffee") $cv -i "$watchIgnores" . | while read -r line; do
-        verbose 1 CHANGE: $line
-        set $line
-        local file=$(cygpath "${line#$1 }")
-        if [ "$1" = BEGIN ]; then
-            echo 'begin transaction;'
-            inTransaction=true
-        elif [ "$1" = END ]; then
-            echo 'commit transaction;'
-            inTransaction=''
-        else
-            [ -n "$notify" ] && changes[${#changes[*]}]="$1 $file"
-            [ -z "$inTransaction" ] && echo 'begin transaction;'
-            case "$1" in
-                DELETE)
-                    verbose 1 1 DELETE "$file"
-                    deleteFiles "$file"
-                    ;;
-                CREATE)
-                    verbose 1 CREATE "$file"
-                    addFiles "$file"
-                    ;;
-                MODIFY)
-                    verbose 1 MODIFY "$file"
-                    deleteLines "$file"
-                    addFiles "$file"
-                    ;;
-            esac
-            [ -z "$inTransaction" ] && echo 'commit transaction;'
-        fi
-    done | sqlite3 .indexer
-    for change in "${changes[@]}"; do
-        echo "$change"
-    done
-}
+coffee=()
 
 verbose() {
     if [ "$1" -le "$V" ]; then
@@ -74,19 +25,9 @@ checkDir() {
     fi
 }
 
-sql() {
+coffee() {
     checkDir
-    cmd=$(cat <<EOF
-begin transaction;
-create table if not exists files (path primary key, stamp);
-create virtual table if not exists lines using fts4 (path, line_number, line, notindexed=line_number, notindexed=path);
-create virtual table if not exists lines_terms using fts4aux(lines);
-$*
-commit transaction;
-EOF
-)
-    verbose 2 SQL COMMAND: "$cmd"
-    echo -E "$cmd" | sqlite3 .indexer
+    exec coffee $(cygpath -w "$app/watch.coffee") "${coffee[@]}" .
 }
 
 scrub() {
@@ -94,64 +35,10 @@ scrub() {
     rm -f ".indexer"
 }
 
-addFiles() {
-    if [ $# != 0 ]; then
-        clauses=$(expr "$(find "$@" -type f -printf ',("%p",%A@)' -o -prune)" : '.\(.*\)')
-        verbose 1 Add files values $clauses
-        verbose 2 "insert or replace into files values $clauses;"
-        echo "insert or replace into files values $clauses;"
-        addLines "$@"
-    fi
-}
-
-addLines() {
-    verbose 1 Add lines "$@"
-    deleteLines "$@"
-    files=()
-    for f in "$@"; do
-        if file $f | grep text > /dev/null; then
-            files[${#files[*]}]="$f"
-        fi
-    done
-    for file in "${files[@]}"; do
-        f=$(sed 's/\//\\\//g' <<< "$file")
-        if [ -z "$quiet" ]; then
-            echo "select 'inserting $file';"
-        fi
-        verbose 2 SQL COMMANDS: "$(sed -e "=;s/'/''/g" $file | sed -e "N;s/\n/ /;s/^\([^ ]*\) \(.*\)$/insert into lines values ('$f', \1, '\2');/")"
-        sed -e "=;s/'/''/g" $file | sed -e "N;s/\n/ /;s/^\([^ ]*\) \(.*\)$/insert into lines values ('$f', \1, '\2');/"
-    done
-}
-
-deleteLines() {
-    verbose 1 Delete lines "$@"
-    paths=''
-    for path in "$@"; do
-        paths="$paths$path\n"
-    done
-    verbose 2 -e PATHS: "'$paths'"
-    paths=$(echo -e "$paths" | sed "/^$/d;s/'/''/g;s/^.*$/('&')/;s/^/,/;1s/^,//")
-    verbose 2 "delete from lines where path in (values $(echo $paths));"
-    echo "delete from lines where path in (values $(echo $paths));"
-}
-
-deleteFiles() {
-    deleteLines "$@"
-    verbose 1 Delete files "$@"
-    paths=''
-    for path in "$@"; do
-        paths="$paths$path\n"
-    done
-    verbose 2 -e PATHS: "'$paths'"
-    paths=$(echo -e "$paths" | sed "/^$/d;s/'/''/g;s/^.*$/('&')/;s/^/,/;1s/^,//")
-    verbose 2 "delete from files where path in (values $(echo $paths));"
-    echo "delete from files where path in (values $(echo $paths));"
-}
-
 prefixSearch() {
     checkDir
     verbose 1 Search pattern: "$pattern", dir: "$dir"
-    sqlite3 .indexer "select path || ':' || line_number || ':' || line from lines where line match '$pattern*' $limit"
+    sqlite3 .indexer "select file || ':' || line_number || ':' || line from lines where line match '$pattern*' $limit"
 }
 
 middleSearch() {
@@ -161,104 +48,41 @@ middleSearch() {
     terms=$(sqlite3 .indexer "select term from lines_terms where term glob '*$pattern*'")
     for t in $terms; do
         if [ -n "$cmd" ]; then
-            cmd="$cmd union select rowid, path, line_number, line from lines where line match '$t'"
+            cmd="$cmd union select rowid, file, line_number, line from lines where line match '$t'"
         else
-            cmd="select rowid, path, line_number, line from lines where line match '$t'"
+            cmd="select rowid, file, line_number, line from lines where line match '$t'"
         fi
     done
     if [ -n "$terms" ]; then
         #echo SQL: "$cmd"
         echo TERMS: $terms
-        sqlite3 .indexer "select path || ':' || line_number || ':' || line from ($cmd) group by rowid order by rowid $limit"
+        sqlite3 .indexer "select file || ':' || line_number || ':' || line from ($cmd) group by rowid order by rowid $limit"
     else
         echo NO TERMS
     fi
 }
 
-update() {
+callers() {
     checkDir
-    verbose 1 Update
-    inserts=$(findCommand -printf 'insert into currentFiles values ("%p",%A@,"CREATE");\n')
-    verbose 1 UPDATE CLAUSES: "$inserts"
-    cmd=$(cat <<EOF
-create temp table currentFiles(path primary key, stamp, state);
-$inserts
-update currentFiles set state = 'MODIFY' where path in (select path from files);
-create temp table newFiles as
-  select currentFiles.path, currentFiles.state
-    from currentFiles left join files on currentFiles.path = files.path
-    where files.path is null or files.stamp < currentFiles.stamp;
-insert into newFiles
-  select files.path, 'DELETE'
-    from files left join currentFiles on currentFiles.path = files.path
-    where currentFiles.path is null;
-delete from files where path not in (select path from currentFiles);
-delete from lines where path not in (select path from currentFiles);
-select state || " " || path from newFiles;
-EOF
-)
-    output=$(sql "$cmd")
-    verbose 1 -E SQL: "$output"
-    if [ -n "$output" ]; then
-        files=()
-        while read -r file; do
-            set $file
-            if [ "$1" != DELETE ]; then
-                verbose 1 FILE: $file
-                files[${#files[*]}]="${file#$1 }"
-            fi
-        done <<< "$output"
-        verbose 1 Inserting files: "${files[@]}"
-        (echo 'begin transaction;'
-        verbose 2 'begin transaction;'
-        addFiles "${files[@]}"
-        verbose 2 'commit transaction;'
-        echo 'commit transaction;') | sqlite3 .indexer
-        if [ -n "$notify" ]; then
-            echo "$output"
-        fi
-    else
-        verbose 1 No recent changes.
-    fi
+    sqlite3 .indexer "select coffee.file || ':' || coffee.line || ':' || col || ':' || code || ':' || lines.line from coffee, lines where call = '$func' and coffee.file = lines.file and coffee.line = lines.line_number order by coffee.rowid"
+}
+
+callees() {
+    checkDir
+    sqlite3 .indexer "select coffee.file || ':' || coffee.line || ':' || col || ':' || code || ':' || call || ':' || lines.line from coffee, lines where code = '$func' and coffee.file = lines.file and coffee.line = lines.line_number order by coffee.rowid"
+}
+
+funcs() {
+    checkDir
+    sqlite3 .indexer "select code from coffee group by code order by rowid"
 }
 
 setAction() {
     if [ -n "$option" ]; then
-        usage "Attempt to use to actions at once, $option and $1"
+        usage "Attempt to use two actions at once, $option and $1"
     fi
     option=$1
     action=$2
-}
-
-escape() {
-    sed -e 's/[.\\]/\\&/g;s/\*/.*/g' <<< "$1"
-}
-
-addIgnore() {
-    verbose 1 add ignore "$1"
-    if [ "$1" = / ]; then
-        exit
-    fi
-    anchored=$(expr "$1" : '/\(.*\)')
-    findIgnores[${#findIgnores[*]}]=-o
-    findIgnores[${#findIgnores[*]}]="-wholename"
-    if [ -n "$anchored" ]; then
-        f=$(expr "$1" : '.\(.*\)')
-        findIgnores[${#findIgnores[*]}]="./$f"
-        watchIgnores="$watchIgnores|^$(escape $f)(\\\\|$)"
-    else
-        findIgnores[${#findIgnores[*]}]="*$1"
-        watchIgnores="$watchIgnores|(^|\\\\)$(escape $1)(\\\\|$)"
-    fi
-}
-
-findCommand() {
-    checkDir
-    if [ $# = 0 ]; then
-        set -- -print
-    fi
-    verbose 1 find command: find . "(" "${findIgnores[*]}" ")" -prune -o -type f "$@"
-    find . "(" "${findIgnores[@]}" ")" -prune -o -type f "$@"
 }
 
 processArgs() {
@@ -280,30 +104,48 @@ processArgs() {
                 pattern="$2"
                 shift
                 ;;
-            -u)
-                setAction -u update
-                ;;
-            -m)
-                setAction -m monitor
-                ;;
             -i)
-                addIgnore "$2"
+                coffee[${#coffee[*]}]=-i
+                coffee[${#coffee[*]}]="$2"
                 shift
                 ;;
             -v)
                 V=$((V + 1))
+                coffee[${#coffee[*]}]=-v
                 ;;
             -q)
-                quiet=true
+                coffee[${#coffee[*]}]=-q
                 ;;
             -n)
-                quiet=true
-                notify=true
+                coffee[${#coffee[*]}]=-n
                 ;;
             -l)
                 limit="limit $2 offset $3"
                 shift
                 shift
+                ;;
+            -m)
+                setAction -m coffee
+                ;;
+            -u)
+                coffee[${#coffee[*]}]=-u
+                setAction -u coffee
+                ;;
+            -c)
+                coffee[${#coffee[*]}]=-c
+                ;;
+            --callers)
+                setAction --callers callers
+                func="$2"
+                shift
+                ;;
+            --callees)
+                setAction --callees callees
+                func="$2"
+                shift
+                ;;
+            --funcs)
+                setAction --funcs funcs
                 ;;
             -*)
                 usage "Unknown argument: $1"
@@ -314,6 +156,9 @@ processArgs() {
         esac
         shift
     done
+    if [ -n "$coffee" -a "$action" != "coffee" ]; then
+        usage "Options require -u or -m"
+    fi
 }
 
 usage() {
@@ -330,14 +175,18 @@ OPTIONS:
   -h            Print this message
   -d            Delete the .indexer database
   -i PATTERN    Ignore files matching pattern
-  -s PATTERN    Search for prefix token pattern in files and return matched lines in grep format
+  -s PATTERN    Search for token pattern in files and return matched lines in grep format
+  -p PATTERN    Search for prefix token pattern in files and return matched lines in grep format
+  -l LIM OFF    Limit the number of search results to LIM and discard the first OFF
   -t PATTERN    Find all tokens matching pattern
-  -u            Update
-  -m            Update and continue monitoring for changes
   -v            Inccrease verbosity
   -q            Turn off progress notifications
   -n            Notify of changes (implies -q): 'DELETE'|'CREATE'|'MODIFY' FILE
-  -l LIM OFF    Limit the number of search results to LIM and discard the first OFF
+  -u            Update
+  -m            Update and continue monitoring for changes
+  -c            Index CoffeeScript callers and callees
+  --callers F   List call sites of F: FILE:LINE:COL:FUNC
+  --callee F    List F's call sites: FILE:LINE:COL:FUNC
 EOF
     exit 1
 }

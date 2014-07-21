@@ -1,5 +1,5 @@
 {
-  "name": "Directory text indexer",
+  "name": "Indexer",
   "main": "watch.coffee",
   "version": "1.0.0",
   "description": "A very simple platform for indexing and searching directories",
@@ -13,7 +13,7 @@
   "homepage": "https://github.com/zot/Indexer",
   "repository": {
     "type": "git",
-    "url": "http://openshift.redhat.com/",
+    "url": "http://openshift.redhat.com/"
   },
 
   "engines": {
@@ -23,8 +23,10 @@
 
   "dependencies": {
       "lodash": "*",
-      "watch": "*",
+      "sqlite3": "*",
+      "mmmagic": "*",
+      "watch": "*"
   },
   "devDependencies": {},
-  "bundleDependencies": [],
+  "bundleDependencies": []
 }
