@@ -1,9 +1,14 @@
 {
-  "name": "Indexer",
+  "name": "SourceCodex",
   "main": "watch.coffee",
   "version": "1.0.0",
-  "description": "A very simple platform for indexing and searching directories",
+  "description": "A very simple platform for searching calls/callers (and terms) in code projects",
   "keywords": [
+      "index",
+      "code",
+      "callers",
+      "calls",
+      "callees"
   ],
   "author": {
     "name": "Bill Burdick",
@@ -13,20 +18,19 @@
   "homepage": "https://github.com/zot/Indexer",
   "repository": {
     "type": "git",
-    "url": "http://openshift.redhat.com/"
+    "url": "https://github.com/zot/SourceCodex"
   },
-
   "engines": {
     "node": ">= 0.10.0",
     "npm": ">= 1.0.0"
   },
-
   "dependencies": {
       "lodash": "*",
       "sqlite3": "*",
       "mmmagic": "*",
       "coffee-script": "*",
-      "watch": "*"
+      "watch": "*",
+      "acorn": "*"
   },
   "devDependencies": {},
   "bundleDependencies": []

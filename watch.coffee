@@ -2,10 +2,13 @@
 fs = require 'fs'
 path = require 'path'
 child_process = require 'child_process'
+util = require 'util'
 magic = new (require('mmmagic').Magic)()
 w = require 'watch'
 _ = require 'lodash'
 cs = require 'coffee-script'
+acorn = require 'acorn'
+acorn.walk = require 'acorn/util/walk'
 nodes = require 'coffee-script/lib/coffee-script/nodes'
 sqlite3 = require 'sqlite3'
 dir = null
@@ -14,15 +17,16 @@ fullDir = null
 batch = {}
 coffeeFile = /\.coffee$/
 indexCoffee = false
+indexJs = false
 db = null
-util = require 'util'
 quiet = false
 updateOnly = false
 notify = false
 ignoreReg = null
+rebuild = false
 
 verbose = (level, args...)->
-  if !quiet && verboseLevel <= level then write args...
+  if !quiet && level <= verboseLevel then write args...
 
 write = (args...)-> process.stderr.write args.join(' ') + '\n'
 
@@ -109,6 +113,7 @@ class Batch
         run "insert into lines values ('#{file}', #{l}, '#{escapeString line}');"
         l++
       if indexCoffee then indexCoffeeFile file, text
+      if indexJs then indexJsFile file, text
   processBatch: ->
     runSql =>
       run "begin transaction;"
@@ -119,11 +124,11 @@ class Batch
         @addLines file
       run "end transaction;"
     @emitChanges()
-  emitChanges: ->
+  emitChanges: (notifyReady)->
     if notify
       for file, [type] of @pendingOut
         console.log "#{type} #{file}"
-    verbose 0, "READY"
+    if notifyReady then verbose 0, "READY"
 
 processInitialFiles = (files)->
   tot = 0
@@ -156,8 +161,8 @@ processInitialFiles = (files)->
       run "delete from files where file not in (select file from currentFiles);"
       run "delete from lines where file not in (select file from currentFiles);"
       run "insert or replace into files select file, stamp from currentFiles where state != 'DELETE';"
-      run "delete from coffee_defs where file in (select file from newFiles where state = 'DELETE');"
-      run "delete from coffee_calls where file in (select file from newFiles where state = 'DELETE');"
+      run "delete from defs where file in (select file from newFiles where state = 'DELETE');"
+      run "delete from calls where file in (select file from newFiles where state = 'DELETE');"
       db.each "select * from (select file, state, stamp, 1 as ord from newFiles union values (null, null, null, 2)) order by ord;", (err, row)=>
         if err then write "ERROR: #{err}"
         else if row.file != null then newFiles.push row
@@ -169,7 +174,7 @@ processInitialFiles = (files)->
               @addLines row.file
               @pendingOut[row.file] = [row.state, row.stamp]
             run "commit transaction;"
-            @emitChanges()
+            @emitChanges true
       run "commit transaction;"
   for file, stat of files
     b.add file, null, stat
@@ -177,19 +182,21 @@ processInitialFiles = (files)->
 
 checkDb = ->
   if !db
-    db = new sqlite3.Database(fullDir + '.sourcecodex')
+    dbPath = fullDir + '.sourcecodex'
+    if rebuild && fs.existsSync dbPath then fs.unlink dbPath
+    db = new sqlite3.Database dbPath
     sql """
 begin transaction;
 create table if not exists files (file primary key, stamp);
 create virtual table if not exists lines using fts4 (file, line_number, line, notindexed=line_number, notindexed=file);
 create virtual table if not exists lines_terms using fts4aux(lines);
-create table if not exists coffee_defs(file, code, line_number, col);
-create table if not exists coffee_calls(file, code, call, line_number, col);
-create index if not exists coffee_1 on coffee_defs(file);
-create index if not exists coffee_2 on coffee_defs(file, code);
-create index if not exists coffee_3 on coffee_calls(file);
-create index if not exists coffee_4 on coffee_calls(file, code);
-create index if not exists coffee_5 on coffee_calls(file, call);
+create table if not exists defs(file, code, line_number, col);
+create table if not exists calls(file, code, call, line_number, col);
+create index if not exists sc_1 on defs(file);
+create index if not exists sc_2 on defs(file, code);
+create index if not exists sc_3 on calls(file);
+create index if not exists sc_4 on calls(file, code);
+create index if not exists sc_5 on calls(file, call);
 commit transaction;
 """.split('\n')...
 
@@ -210,52 +217,103 @@ run = (statement)->
 # Call graphs
 #####################
 
-class NodeStack
-  constructor: ->
-    @parentStack = []
-    @contextStack = []
-  pushNode: (node)-> @parentStack.push node
-  popNode: -> @parentStack.pop()
-  pushContext: (name)-> @contextStack.push name
-  popContext: -> @contextStack.pop()
-  topNode: -> _.last @parentStack
-  topContext: -> _.last @contextStack
-  contextPad: ->
-    pad = ''
-    for i in [0...@contextStack.length]
-      pad += '  '
-    pad
+class CSNodes
+  constructor: (node)->
+    @node = (if typeof node == 'string'
+      if m = node.match /\.(lit)?coffee$/ then cs.nodes(node, literate: m[1]?) else null
+    else node)
+  traverse: (func)-> @subtraverse @node, func
+  subtraverse: (node, func)->
+    func node, => node.eachChild (child)=> @subtraverse child, func
+  findCallGraph: (callback)->
+    context = []
+    @traverse (node, cont)=>
+      if @isDef node
+        v = node.variable
+        context.push v.base.value
+        callback.def node, v.base.value, v.locationData.first_line + 1, v.locationData.first_column
+        cont()
+        context.pop()
+      else
+        if @isCall node
+          v = node.variable
+          callback.call context[context.length - 1], node, v.base.value, v.locationData.first_line + 1, v.locationData.first_column
+        cont()
+  isDef: (node)-> node instanceof nodes.Assign && node.value instanceof nodes.Code
+  isCall: (node)->
+    node instanceof nodes.Call &&
+    node.variable instanceof nodes.Value
 
-stackTraverseNode = (node, func)-> substackTraverse node, new NodeStack(), func
-
-substackTraverse = (node, stack, func)->
-  func node, stack, ->
-    stack.pushNode node
-    node.eachChild (child)-> substackTraverse child, stack, func
-    stack.popNode()
-
-isDef = (node)-> node instanceof nodes.Assign && node.value instanceof nodes.Code
-
-isCall = (node)->
-  node instanceof nodes.Call &&
-  node.variable instanceof nodes.Value
+class JSNodes
+  constructor: (source)->
+    @node = acorn.parse source
+    lines = source.split /(\r?\n)/
+    @lineIndices = [0]
+    for i in [0...lines.length] by 2
+      @lineIndices.push _.last(@lineIndices) + lines[i].length + (lines[i + 1] || '').length
+  position: (index)->
+    i = _.sortedIndex @lineIndices, index + 1
+    [i, index - (@lineIndices[i - 1] || 0)]
+  nodeKey: (node)-> node.type + node.start
+  findCallGraph: (callback)->
+    context = []
+    objects = []
+    seen = {}
+    p = (node, state, override)=>
+      func = call = line = col = null
+      if !override
+        key = @nodeKey node
+        if !seen[key]
+          seen[key] = true
+          if node.type == 'CallExpression'
+            call = node.callee
+          else if node.type == 'AssignmentExpression' && node.left.type == 'Identifier' && node.right.type == 'FunctionExpression'
+            func = node.left
+          else if node.type == 'AssignmentExpression' && node.left.type == 'MemberExpression' && node.right.type == 'FunctionExpression'
+            func = node.left.property
+          else if node.type == 'FunctionDeclaration'
+            func = node.id
+          else if node.type == 'ObjectExpression'
+            objects.push node
+            prop = 0
+            for {key, value} in node.properties
+              value.propNum = prop++
+          else if node.type == 'FunctionExpression' && node.propNum?
+            func = _.last(objects).properties[node.propNum].key
+          if func
+            context.push func
+            [line, col] = @position func.start
+            callback.def node, func.name, line, col
+            verbose 1, "# DEF: #{func.name} #{line} #{col}"
+          else if call
+            [line, col] = @position call.start
+            callback.call _.last(context).name, node, call.name, line, col
+            verbose 1, "# CALL: #{_.last(context).name} #{call.name} #{line} #{col}"
+          verbose 1, "  NODE: #{node.type}, override: #{override}"
+      acorn.walk.base[override || node.type] node, state, p
+      if func then context.pop()
+      else if node.type == 'ObjectExpression' then objects.pop()
+    p @node, null
+    write "done"
 
 indexCoffeeFile = (fpath, source)->
   if m = fpath.match /\.(lit)?coffee$/
-    sql "delete from coffee_defs where file = '#{fpath}'", "delete from coffee_calls where file = '#{fpath}'"
-    stackTraverseNode cs.nodes(source, literate: m[1]?), (node, stack, cont)->
-      if isDef node
-        v = node.variable
-        stack.pushContext v.base.value
-        sql "insert into coffee_defs values ('#{fpath}', '#{v.base.value}', #{v.locationData.first_line + 1}, #{v.locationData.first_column});"
-        cont()
-        stack.popContext()
-      else
-        if isCall node
-          v = node.variable
-          sql "insert into coffee_calls values ('#{fpath}', '#{stack.topContext()}', '#{v.base.value}', #{v.locationData.first_line + 1}, #{v.locationData.first_column});"
-        cont()
+    sql "delete from defs where file = '#{fpath}'", "delete from calls where file = '#{fpath}'"
+    new CSNodes(cs.nodes(source, literate: m[1]?)).findCallGraph
+      def: (node, name, line, col)->
+        sql "insert into defs values ('#{fpath}', '#{name}', #{line}, #{col});"
+      call: (def, node, name, line, col)->
+        sql "insert into calls values ('#{fpath}', '#{def}', '#{name}', #{line}, #{col});"
 
+indexJsFile = (fpath, source)->
+  if fpath.match(/\.js$/) && fpath == 'test.js'
+    fs.readFile fpath, (err, result)->
+      sql "delete from defs where file = '#{fpath}'", "delete from calls where file = '#{fpath}'"
+      new JSNodes(result.toString()).findCallGraph
+        def: (node, name, line, col)->
+          sql "insert into defs values ('#{fpath}', '#{name}', #{line}, #{col});"
+        call: (def, node, name, line, col)->
+          sql "insert into calls values ('#{fpath}', '#{def}', '#{name}', #{line}, #{col});"
 
 #####################
 # Argument processing
@@ -264,15 +322,18 @@ indexCoffeeFile = (fpath, source)->
 usage = (msgs...)->
   if msg.length > 0 then console.log msgs...
   console.log """
-Usage #{process.argv[0]} [-i IGNOREPAT | -v] DIR
+Usage #{process.argv[0]} [-i IGNOREPAT | -v | -r | -c | -j | -u | -q | -n ] DIR
 DIR is the directory containing the files to monitor.
 OPTIONS:
   -h            Help: print this message
   -i IGNOREPAT  Pattern of files not to monitor
   -v            Increase verbosity
+  -r            Remove and rebuild database
   -c            Index CoffeeScript files
+  -j            Index JavaScript files
   -u            Update only -- exit after updating
   -q            Don't emit file tree modification messages
+  -n            Output changes: 'CREATE'|'MODIFY'|'DELETE' FILE
 """
   process.exit 1
 
@@ -286,7 +347,9 @@ processArgs = ->
       when '-v'
         verboseLevel++
         quiet = false
+      when '-r' then rebuild = true
       when '-c' then indexCoffee = true
+      when '-j' then indexJs = true
       when '-q' then if verboseLevel == 0 then quiet = true
       when '-u' then updateOnly = true
       when '-n'

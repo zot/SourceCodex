@@ -1,24 +1,24 @@
 * SourceCodex
-A very simple platform for searching callers/callees (and terms) in code projects
+A very simple platform for searching calls/callers (and terms) in code projects
 
-** Goals
-- search for callers/callees and patterns
-- fast enough for incremental completion
-- simple
-- easy to extend for languages besides CoffeeScript
-- command line tool
-- zero admin (command line option to monitor project changes means no service needed)
-- small number of dependencies (POSIX/cygwin and node.js)
+** Features
+- Searches for callers/callees and patterns
+- Fast enough to use for incremental completion
+- Simple to use (command line tool)
+- Simple design (only two source files: a shell script and a CoffeeScript program)
+- Supports JavaScript and CoffeeScript
+- Easy to extend for additional languages
+- Zero admin (command line option to monitor project changes means no service needed)
+- Small number of dependencies (POSIX/cygwin, node.js, and several node.js projects)
 
 ** USAGE
 #+BEGIN_SRC example
-sourcecodex [-h | -d | -s PATTERN | -m | -u] [DIR]
+sourcecodex [ -h | -i PATTERN | -s PATTERN | -p PATTERN | -l LIM OFF | -t PATTERN | -v | -q | -n | -d | -r | -u | -m | -c | -j | --callers F | --calls F | --defs ] [DIR]
 DIR is the directory containing the files to index.
 If DIR is given, a new ".sourcecodex" database is created
 in DIR if it does not exist
 OPTIONS:
   -h            Print this message
-  -d            Delete the .sourcecodex database
   -i PATTERN    Ignore files matching pattern
   -s PATTERN    Search for token pattern in files and return matched lines in grep format
   -p PATTERN    Search for prefix token pattern in files and return matched lines in grep format
@@ -27,22 +27,23 @@ OPTIONS:
   -v            Inccrease verbosity
   -q            Turn off progress notifications
   -n            Notify of changes (implies -q): 'DELETE'|'CREATE'|'MODIFY' FILE
-  -u            Update
+  -d            Delete the .sourcecodex database
+  -r            Delete and rebuild database
+  -u            Update and then exit
   -m            Update and continue monitoring for changes
   -c            Index CoffeeScript callers and callees
+  -j            Index JavaScript callers and callees
   --callers F   List call sites of F: FILE:LINE:COL:FUNC:CONTENTS
-  --callees F   List F's call sites: FILE:LINE:COL:FUNC:CONTENTS
+  --calls F     List F's call sites: FILE:LINE:COL:FUNC:CONTENTS
   --defs        List defs: FILE:LINE:COL:FUNC:CONTENTS
 #+END_SRC
 
 ** Architecture
 - built on SQLite
-  - allows different programs to use the same database
   - allows background updating
   - other programs can access/change the database
 - extensible
-  - update/monitor command prints events like inotifywatch (CREATE/MODIFY/DELETE file)
-    - you can pipe/tee the output to other programs
+  - update/monitor command can output events like inotifywatch (CREATE/MODIFY/DELETE file)
   - other programs can query/change the database
 
 ** Todo
@@ -52,6 +53,7 @@ OPTIONS:
 - remove POSIX deps (add bat file for search command)
 
 ** References
+- Tern (sourcecodex uses Tern's parser)
 - Other code search tools: http://beyondgrep.com/more-tools/
 - Russ Cox's work
   - codesearch: https://code.google.com/p/codesearch/
@@ -62,12 +64,14 @@ OPTIONS:
   - (opengrok, gnu global): https://github.com/OpenGrok/OpenGrok/wiki/Comparison-with-Similar-Tools
 
 ** Schema
-There are 3 main tables: files, lines, and lines_terms.
+There are 5 main tables: files, lines, lines_terms, defs, and calls.
 
 #+BEGIN_SRC SQL
 create table files (path primary key, stamp);
 create virtual table lines using fts4 (path, line_number, line);
 create virtual table lines_terms using fts4aux(lines);
+create table defs(file, code, line_number, col);
+create table calls(file, code, call, line_number, col);
 #+END_SRC
 
 Files tracks the indexed files.
@@ -76,9 +80,6 @@ Lines stores all of the lines of the tracked files and maintains a full-text ind
 
 Lines_terms lets you access the internals of the index like the terms (tokens).
 
-Here are the CoffeeScript call graph tables:
+Defs tracks the definitions in the files.
 
-#+BEGIN_SRC SQL
-create table coffee_defs(file, code, line_number, col);
-create table coffee_calls(file, code, call, line_number, col);
-#+END_SRC
+Calls tracks the calls to the definitions in the files.
