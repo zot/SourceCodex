@@ -46,23 +46,6 @@ OPTIONS:
   - update/monitor command can output events like inotifywatch (CREATE/MODIFY/DELETE file)
   - other programs can query/change the database
 
-** Todo
-- support full regexp search
-  - maybe just narrow down the lines with a pattern and then pump them through grep
-  - maybe based on Russ Cox's work
-- remove POSIX deps (add bat file for search command)
-
-** References
-- Tern (sourcecodex uses Tern's parser)
-- Other code search tools: http://beyondgrep.com/more-tools/
-- Russ Cox's work
-  - codesearch: https://code.google.com/p/codesearch/
-  - trigram analysis: http://swtch.com/~rsc/regexp/regexp4.html
-- beagrep: http://baohaojun.github.io/beagrep.html
-  - beagrep looks very similar, but the author says it's very difficult to install on windows
-- some similar tools do not do callers/callees
-  - (opengrok, gnu global): https://github.com/OpenGrok/OpenGrok/wiki/Comparison-with-Similar-Tools
-
 ** Schema
 There are 5 main tables: files, lines, lines_terms, defs, and calls.
 
@@ -83,3 +66,24 @@ Lines_terms lets you access the internals of the index like the terms (tokens).
 Defs tracks the definitions in the files.
 
 Calls tracks the calls to the definitions in the files.
+
+** Todo
+- index referenced variables
+  - add column to defs and calls to specify type of def or call (func or var)
+- support full regexp search
+  - maybe just narrow down the lines with a pattern and then pump them through grep
+  - maybe based on Russ Cox's work
+- remove POSIX deps (add bat file for search command)
+
+** References
+- Smalltalk: On the Smalltalk Browser (80s), http://onsmalltalk.com/on-the-smalltalk-browser
+- Tern (sourcecodex uses Tern's parser)
+- Russ Cox's work
+  - codesearch: https://code.google.com/p/codesearch/
+  - trigram analysis: http://swtch.com/~rsc/regexp/regexp4.html
+- beagrep: http://baohaojun.github.io/beagrep.html
+  - beagrep looks very similar, but the author says it's very difficult to install on windows
+- some similar tools do not do callers/callees
+  - (opengrok, gnu global): https://github.com/OpenGrok/OpenGrok/wiki/Comparison-with-Similar-Tools
+- Cscope: http://en.wikipedia.org/wiki/Cscope http://cscope.sourceforge.net/history.html
+- Other code search tools: http://beyondgrep.com/more-tools/

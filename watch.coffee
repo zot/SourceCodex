@@ -190,7 +190,7 @@ begin transaction;
 create table if not exists files (file primary key, stamp);
 create virtual table if not exists lines using fts4 (file, line_number, line, notindexed=line_number, notindexed=file);
 create virtual table if not exists lines_terms using fts4aux(lines);
-create table if not exists defs(file, code, line_number, col);
+create table if not exists defs(file, code, parent, line_number, col, type);
 create table if not exists calls(file, code, call, line_number, col);
 create index if not exists sc_1 on defs(file);
 create index if not exists sc_2 on defs(file, code);
@@ -227,22 +227,65 @@ class CSNodes
     func node, => node.eachChild (child)=> @subtraverse child, func
   findCallGraph: (callback)->
     context = []
+    topVars = vars = {}
     @traverse (node, cont)=>
-      if @isDef node
-        v = node.variable
-        context.push v.base.value
-        callback.def node, v.base.value, v.locationData.first_line + 1, v.locationData.first_column
+      if node instanceof nodes.Code
+        if node.assignment then context.push node.assignment.base
+        oldVars = vars
+        vars = __proto__: oldVars
         cont()
-        context.pop()
+        vars = oldVars
+        if node.assignment then context.pop()
       else
-        if @isCall node
-          v = node.variable
-          callback.call context[context.length - 1], node, v.base.value, v.locationData.first_line + 1, v.locationData.first_column
+        if @isVarAssign node
+          for [n, v] in @assigns node.variable, node.value, []
+            if n != _.last(context)
+              callback.def (if v instanceof nodes.Code then 'function' else 'variable'), @parent(n, context, topVars, node), n, n.value, n.locationData.first_line + 1, n.locationData.first_column
+              vars[n.value] = true
+        else if node instanceof nodes.Class
+          write "CLASS: #{util.inspect node}"
+          node.variable.def = true
+          v = node.variable.base
+          callback.def 'class', @parent(node, context, topVars), node, v.value, v.locationData.first_line + 1, v.locationData.first_column
+          vars[node.value] = true
+        else if @isRef node, context
+          if node.base.value[0].match /[_$a-zA-Z]/
+            b = node.base
+            callback.call _.last(context)?.value || '', node, b.value, b.locationData.first_line + 1, b.locationData.first_column
         cont()
-  isDef: (node)-> node instanceof nodes.Assign && node.value instanceof nodes.Code
-  isCall: (node)->
-    node instanceof nodes.Call &&
-    node.variable instanceof nodes.Value
+  parent: (node, context, topVars, assignNode)->
+    if context.length == 0 || node.propertyReference || topVars[node.value] || assignNode.context == 'object' then ''
+    else _.last(context).value
+  isVarAssign: (node)-> node instanceof nodes.Assign
+  isRef: (node, context)->
+    node instanceof nodes.Value && !node.def && node.base instanceof nodes.Literal
+  assigns: (variable, value, result)->
+    if variable.base instanceof nodes.Literal
+      if value instanceof nodes.Code
+        value.assignment = variable
+      if variable.properties.length
+        prop = _.last(variable.properties).name
+        prop.propertyReference = true
+        result.push [prop, value]
+      else
+        variable.def = true
+        result.push [variable.base, value]
+    else if variable.base instanceof nodes.Arr
+      for i in [0...variable.base.objects.length]
+        @assigns variable.base.objects[i], value.base.objects[i], result
+    else if variable.base instanceof nodes.Obj
+      if value.base instanceof nodes.Obj
+        obj = {}
+        o = value.base
+        for prop in [0...o.properties.length]
+          obj[o.properties[prop].variable.name] = o.properties[prop].variable.value
+        for i in [0...variable.base.properties.length]
+          @assigns variable.base.properties[i], obj[variable.base.properties[i].base.value], result
+      else
+        for i in [0...variable.base.properties.length]
+          @assigns variable.base.properties[i], null, result
+    else write "UNKNOWN TYPE OF ASSIGNMENT: #{variable.base.constructor.name} #{util.inspect variable}"
+    result
 
 class JSNodes
   constructor: (source)->
@@ -263,6 +306,7 @@ class JSNodes
       func = call = line = col = null
       if !override
         key = @nodeKey node
+        refType = 'function'
         if !seen[key]
           seen[key] = true
           if node.type == 'CallExpression'
@@ -283,7 +327,7 @@ class JSNodes
           if func
             context.push func
             [line, col] = @position func.start
-            callback.def node, func.name, line, col
+            callback.def refType, '', node, func.name, line, col
             verbose 1, "# DEF: #{func.name} #{line} #{col}"
           else if call
             [line, col] = @position call.start
@@ -300,8 +344,8 @@ indexCoffeeFile = (fpath, source)->
   if m = fpath.match /\.(lit)?coffee$/
     sql "delete from defs where file = '#{fpath}'", "delete from calls where file = '#{fpath}'"
     new CSNodes(cs.nodes(source, literate: m[1]?)).findCallGraph
-      def: (node, name, line, col)->
-        sql "insert into defs values ('#{fpath}', '#{name}', #{line}, #{col});"
+      def: (refType, parent, node, name, line, col)->
+        sql "insert into defs values ('#{fpath}', '#{name}', '#{parent}', #{line}, #{col}, '#{refType}');"
       call: (def, node, name, line, col)->
         sql "insert into calls values ('#{fpath}', '#{def}', '#{name}', #{line}, #{col});"
 
@@ -310,8 +354,8 @@ indexJsFile = (fpath, source)->
     fs.readFile fpath, (err, result)->
       sql "delete from defs where file = '#{fpath}'", "delete from calls where file = '#{fpath}'"
       new JSNodes(result.toString()).findCallGraph
-        def: (node, name, line, col)->
-          sql "insert into defs values ('#{fpath}', '#{name}', #{line}, #{col});"
+        def: (refType, parent, node, name, line, col)->
+          sql "insert into defs values ('#{fpath}', '#{name}', '#{parent}', #{line}, #{col}, '#{refType}');"
         call: (def, node, name, line, col)->
           sql "insert into calls values ('#{fpath}', '#{def}', '#{name}', #{line}, #{col});"
 

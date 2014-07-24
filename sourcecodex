@@ -7,6 +7,9 @@ V=0
 dirChecked=''
 limit=''
 coffee=()
+parent="defs.parent = ''"
+all=''
+localcalls=''
 
 verbose() {
     if [ "$1" -le "$V" ]; then
@@ -62,19 +65,36 @@ middleSearch() {
     fi
 }
 
-callers() {
-    checkDir
-    sqlite3 .sourcecodex "select file || ':' || line_number || ':' || col || ':' || code || ':' || line from calls, lines using(file,line_number) where call = '$func' order by calls.rowid"
+setLocal() {
+    parent="(defs.parent = '' or defs.parent = '$1')"
 }
 
-callees() {
+callers() {
     checkDir
-    sqlite3 .sourcecodex "select file || ':' || line_number || ':' || col || ':' || code || ':' || call || ':' || line from calls, lines using(file,line_number) where code = '$func' order by calls.rowid"
+    sqlite3 .sourcecodex "select calls.file || ':' || calls.line_number || ':' || calls.col || ':' || calls.code || ':' || line from calls, lines, defs where calls.file = lines.file and calls.line_number = lines.line_number and call = '$func' and defs.code = calls.code and $parent and exists (select * from defs where code = '$func' and $parent) order by calls.rowid"
+}
+
+allCalls() {
+    checkDir
+    sqlite3 .sourcecodex "select calls.file || ':' || calls.line_number || ':' || calls.col || ':' || calls.code || ':' || call || ':' || line from calls, lines where calls.file = lines.file and calls.line_number = lines.line_number order by calls.rowid"
+}
+
+calls() {
+    checkDir
+    if [ -n "$localcalls" ]; then
+        setLocal "$func"
+    fi
+    sqlite3 .sourcecodex "select calls.file || ':' || calls.line_number || ':' || calls.col || ':' || calls.code || ':' || call || ':' || line from calls, lines, defs where calls.file = lines.file and calls.line_number = lines.line_number and defs.code = call and calls.code = '$func' and $parent order by calls.rowid"
+}
+
+allDefs() {
+    checkDir
+    sqlite3 .sourcecodex "select file || ':' || line_number || ':' || col || ':' || type || ':' || code || ':' || parent || ':' || line from defs, lines using(file,line_number) order by defs.rowid"
 }
 
 defs() {
     checkDir
-    sqlite3 .sourcecodex "select file || ':' || line_number || ':' || col || ':' || code || ':' || line from defs, lines using(file,line_number) group by file,code order by defs.rowid"
+    sqlite3 .sourcecodex "select file || ':' || line_number || ':' || col || ':' || type || ':' || code || ':' || parent || ':' || line from defs, lines using(file,line_number) where $parent order by defs.rowid"
 }
 
 setAction() {
@@ -140,15 +160,33 @@ processArgs() {
             -j)
                 coffee[${#coffee[*]}]=-j
                 ;;
+            -a)
+                all='true'
+                ;;
+            --parent)
+                parent="(defs.parent = '' or defs.parent = '$2')"
+                shift
+                ;;
+            --allcalls)
+                setAction --allcalls allCalls
+                ;;
+            --localcalls)
+                setAction --localcalls calls
+                func="$2"
+                localcalls=true
+                ;;
             --callers)
                 setAction --callers callers
                 func="$2"
                 shift
                 ;;
             --calls)
-                setAction --callees callees
+                setAction --calls calls
                 func="$2"
                 shift
+                ;;
+            --alldefs)
+                setAction --alldefs allDefs
                 ;;
             --defs)
                 setAction --defs defs
@@ -173,7 +211,7 @@ usage() {
         echo
     fi
     cat <<EOF
-Usage: $(basename $0) [ -h | -i PATTERN | -s PATTERN | -p PATTERN | -l LIM OFF | -t PATTERN | -v | -q | -n | -d | -r | -u | -m | -c | -j | --callers F | --calls F | --defs ] [DIR]
+Usage: $(basename $0) [ -h | -i PATTERN | -s PATTERN | -p PATTERN | -l LIM OFF | -t PATTERN | -v | -q | -n | -d | -r | -u | -m | -c | -j | --parent F | --callers F | --calls F | --localcalls F | --allcalls | --defs | --alldefs ] [DIR]
 DIR is the directory containing the files to index.
 If DIR is given, a new ".sourcecodex" database is created
 in DIR if it does not exist
@@ -191,11 +229,15 @@ OPTIONS:
   -r            Delete and rebuild database
   -u            Update and then exit
   -m            Update and continue monitoring for changes
-  -c            Index CoffeeScript callers and callees
-  -j            Index JavaScript callers and callees
+  -c            Index CoffeeScript callers and calls
+  -j            Index JavaScript callers and calls
+  --parent F    Set parent for callers/calls/defs search
   --callers F   List call sites of F: FILE:LINE:COL:FUNC:CONTENTS
   --calls F     List F's call sites: FILE:LINE:COL:FUNC:CONTENTS
+  --localcalls F Shorthand for --calls F --parent F
+  --allcalls    List all calls in the project
   --defs        List defs: FILE:LINE:COL:FUNC:CONTENTS
+  --alldefs     List all defs in the project
 EOF
     exit 1
 }
